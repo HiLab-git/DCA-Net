@@ -30,21 +30,10 @@ from utils.mmd import mmd
 from torch.utils.data import DataLoader
 from tensorboardX import SummaryWriter
 from torchvision import transforms
+from utils.Bigaug import fourier_aug
 
-# from Models.networks.genda_net import Gen_Domain_Atten_Unet
-# from Models.networks.da_net import Domain_Atten_Unet
-# from Models.networks.genda_net_ds import Gen_Domain_Atten_Unet
-from Models.networks.deeplabv3 import DeepLab
+from Models.networks.genda_net import Gen_Domain_Atten_Unet
 
-# os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-
-### 实验重复性
-# torch.manual_seed(123)
-# torch.cuda.manual_seed(123)
-# torch.cuda.manual_seed_all(123)
-# np.random.seed(123)  # Numpy module.
-# random.seed(123)  # Python random module.
-# torch.manual_seed(123)
 torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
 torch.set_default_tensor_type('torch.cuda.FloatTensor')
@@ -76,18 +65,10 @@ def _val_on_the_fly(model: nn.Module, loader_val: DataLoader, writer, iter_num):
                 gt_val = label.cuda()
                 # domain_code = domain_code.cuda()
                 with torch.no_grad():
-                    pred_val, _, _ = model(img_val, extract_feature=False)
-                # soft_gt = get_soft_label(gt_val, train_params['num_classes'])
+                    pred_val, _ = model(img_val)
                 loss_bce_val += bce_criterion(torch.sigmoid(pred_val), gt_val)
                 if torch.isnan(loss_bce_val):
                     raise ValueError('loss_bce is nan while validating')
-                # pred_dis = torch.argmax(pred_val, dim=1, keepdim=Tru1e-3e)
-    
-                ## Remove small connected regions
-                # pred_dis = connectivity_region_analysis(pred_dis.permute(0, 2, 3, 1))
-                # pred_dis = pred_dis.permute(0, 3, 1, 2)
-                
-                # pred_soft = get_soft_label(pred_dis, train_params['num_classes'])  # get soft label
                 pred_val = torch.sigmoid(pred_val) > 0.75
                 pred_val = connectivity_region_analysis(pred_val.permute(0, 2, 3, 1))
                 pred_val = pred_val.permute(0, 3, 1, 2)
@@ -176,25 +157,49 @@ def train(model: torch.nn.Module, loader_train: list, loader_val: DataLoader, tr
             optimizer.zero_grad()
 
             image = None
+            img_name = None
             label = None
+            img_gan = None
+            img_fft = None
             domain_code = None
+            ganTrue = None
             for domain in sample:
                 if image is None:
                     image = domain['image']
+                    img_name = domain['img_name']
+                    img_gan = domain['img_gan']
+                    img_fft = domain['img_gan']
                     label = domain['label']
                     domain_code = domain['dc']
+                    ganTrue = domain['ganTrue']
                 else:
                     image = torch.cat([image, domain['image']], 0)
+                    img_name = np.concatenate((img_name, domain['img_name']), axis = 0)
+                    ganTrue = np.concatenate((ganTrue, domain['ganTrue']), axis = 0)
+                    img_gan = torch.cat([img_gan, domain['img_gan']], 0)
+                    img_fft = torch.cat([img_fft, domain['img_gan']], 0)
                     label = torch.cat([label, domain['label']], 0)
                     domain_code = torch.cat([domain_code, domain['dc']], 0)
 
+            # image_aug = torch.zeros(train_params['aug_num'], image.shape[0], image.shape[1], image.shape[2], image.shape[3])
             image = image.cuda()
             target_map = label.cuda()
-            # domain_code = domain_code.cuda()
-            # 训练前向传播
-            # img, gt = batch['img'].cuda(), batch['gt'].cuda()1e-3
-            seg_pred, seg_tanh, domain_feature = model(image, extract_feature=False)
-            
+            img_gan = img_gan.cuda()
+            random_arr = []
+            for i in range(len(ganTrue)):
+                if ganTrue[i] != '0':
+                    random_arr.append(i)
+            for bs in range(img_fft.shape[0]):
+                if ganTrue[bs] != '0':
+                    random_p = random.choice(random_arr)
+                    img_fft[bs] = fourier_aug(img_fft[bs],img_fft[random_p])
+            img_fft = img_fft.cuda()
+            seg_pred, domain_feature = model(image)
+            seg_pred_gan, _ = model(img_gan)
+            seg_pred_fft, _ = model(img_fft)
+            consistency_loss = mse_criterion(torch.sigmoid(seg_pred_gan), torch.sigmoid(seg_pred_fft))
+            del seg_pred_fft
+            del seg_pred_gan
             # 计算loss
             loss_domain_sdf_all = 0
             for i in range(len(domain_feature)):
@@ -203,21 +208,17 @@ def train(model: torch.nn.Module, loader_train: list, loader_val: DataLoader, tr
                 loss_domain_sdf += mmd(domain_feature[i][1].squeeze(), domain_feature[i][2].squeeze())
                 loss_domain_sdf += mmd(domain_feature[i][0].squeeze(), domain_feature[i][2].squeeze())
                 loss_domain_sdf_all += 10**-i * (1 - torch.sigmoid(loss_domain_sdf / len(domain_feature[i])))
-                # loss_domain_sdf_all += loss_domain_sdf / len(domain_feature[i])
 
             compact_loss, _, _, _ = get_compactness_cost(torch.sigmoid(seg_pred), target_map)
             loss_bce = bce_criterion(torch.sigmoid(seg_pred), target_map)
             loss_dice = dice_crtierion(torch.sigmoid(seg_pred), target_map, train_params['num_classes'])            
-            loss = 0.5*(loss_bce+loss_dice) + 10*loss_domain_sdf_all + compact_loss
             if torch.isnan(loss):
                 raise ValueError('loss is nan while training')
 
-            # loss = 0.5*(loss_bce+loss_dice) + 0.1*loss_domain_sdf_all + compact_loss
+            loss = loss_dice + 0.1*loss_domain_sdf_all + compact_loss + consistency_loss
             # 反向传播更新参数
             optimizer.zero_grad()
             loss.backward()
-            # compact_loss.backward()
-            # loss_sdf.backward()
             optimizer.step()
 
             # tensorboard信息
@@ -225,9 +226,7 @@ def train(model: torch.nn.Module, loader_train: list, loader_val: DataLoader, tr
             writer.add_scalar('loss/loss_bce', loss_bce, iter_num)
             writer.add_scalar('loss/loss_dice', loss_dice, iter_num)
             writer.add_scalar('loss/cos_simila', loss_domain_sdf_all, iter_num)
-            # writer.add_scalar('loss/loss_sdf', loss_sdf, iter_num)
             writer.add_scalar('loss/compact_loss', compact_loss, iter_num)
-            # writer.add_scalar('loss/loss_hausdorff', loss_domain_sdf, iter_num)
             writer.add_scalar('loss/loss', loss, iter_num)
 
             grid_image = make_grid(image.clone().cpu().data, train_params['batch_size'], normalize=True)
@@ -304,13 +303,6 @@ if __name__ == '__main__':
     # set data list
     composed_transforms_tr = transforms.Compose([
         TR.RandomScaleCrop(512),
-        # tr.RandomCrop(512),
-        # tr.RandomRotate(),
-        # tr.RandomFlip(),
-        # tr.elastic_transform(),
-        # tr.add_salt_pepper_noise(),
-        # tr.adjust_light(),
-        # tr.eraser(),
         TR.Normalize_tf(512),
         TR.ToTensor()
     ])
@@ -334,22 +326,9 @@ if __name__ == '__main__':
     writer = SummaryWriter(log_dir=common_params['exp_dir'] + 'domain' + str(data_params['datasettest'][0]))
 
     # 配置分割网络
-    # model = Gen_Domain_Atten_Unet(net_params).cuda()
-    model = DeepLab(net_params).cuda()
+    model = Gen_Domain_Atten_Unet(net_params).cuda()
     print('parameter numer:', sum([p.numel() for p in model.parameters()]))
-    # model = nn.DataParallel(model)
 
-    # # resume model weights
-    # if train_params['resume']:
-    #     checkpoint = torch.load(train_params['snapshot_path'])
-    #     pretrained_dict = checkpoint['model_dict']
-    #     model_dict = model.state_dict()
-    #     # 1. filter out unnecessary keys
-    #     pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
-    #     # 2. overwrite entries in the existing state dict
-    #     model_dict.update(pretrained_dict)
-    #     # 3. load the new state dict
-    #     model.load_state_dict(model_dict)
     if train_params['resume']:
         checkpoint = torch.load(train_params['resume'])
         pretrained_dict = checkpoint['model_state_dict']

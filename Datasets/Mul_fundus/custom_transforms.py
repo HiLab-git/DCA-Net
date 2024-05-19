@@ -132,10 +132,6 @@ class elastic_transform():
         return sample
 
 
-
-
-
-
 class RandomCrop(object):
     def __init__(self, size, padding=0):
         if isinstance(size, numbers.Number):
@@ -145,12 +141,13 @@ class RandomCrop(object):
         self.padding = padding
 
     def __call__(self, sample):
-        img, mask = sample['image'], sample['label']
+        img, mask, img_gan = sample['image'], sample['label'], sample['img_gan']
         # print(img.size)
         w, h = img.size
         if self.padding > 0 or w < self.size[0] or h < self.size[1]:
             padding = np.maximum(self.padding,np.maximum((self.size[0]-w)//2+5,(self.size[1]-h)//2+5))
             img = ImageOps.expand(img, border=padding, fill=0)
+            img_gan = ImageOps.expand(img_gan, border=padding, fill=0)
             mask = ImageOps.expand(mask, border=padding, fill=255)
 
         assert img.width == mask.width
@@ -160,15 +157,19 @@ class RandomCrop(object):
         if w == tw and h == th:
             return {'image': img,
                     'label': mask,
+                    'img_gan':img_gan,
                     'img_name': sample['img_name'],
+                    'ganTrue':sample['ganTrue'],
                     'dc': sample['dc']}
         x1 = random.randint(0, w - tw)
         y1 = random.randint(0, h - th)
         img = img.crop((x1, y1, x1 + tw, y1 + th))
+        img_gan = img_gan.crop((x1, y1, x1 + tw, y1 + th))
         mask = mask.crop((x1, y1, x1 + tw, y1 + th))
         # print(img.size)
         sample['image'] = img
         sample['label'] = mask
+        sample['img_gan'] = img_gan
         return sample
 
 
@@ -194,7 +195,7 @@ class CenterCrop(object):
 
         return {'image': img,
                 'label': mask,
-                'img_name': sample['img_name']}
+                'img_name': sample['img_name'],'ganTrue':sample['ganTrue']}
 
 
 class RandomFlip(object):
@@ -222,6 +223,7 @@ class FixedResize(object):
         img = sample['image']
         mask = sample['label']
         name = sample['img_name']
+        ganTrue = sample['ganTrue']
 
         assert img.width == mask.width
         assert img.height == mask.height
@@ -230,7 +232,8 @@ class FixedResize(object):
 
         return {'image': img,
                 'label': mask,
-                'img_name': name}
+                'img_name': name,
+                'ganTrue':ganTrue}
 
 
 class Scale(object):
@@ -250,14 +253,14 @@ class Scale(object):
         if (w >= h and w == self.size[1]) or (h >= w and h == self.size[0]):
             return {'image': img,
                     'label': mask,
-                    'img_name': sample['img_name']}
+                    'img_name': sample['img_name'],'ganTrue':sample['ganTrue']}
         oh, ow = self.size
         img = img.resize((ow, oh), Image.BILINEAR)
         mask = mask.resize((ow, oh), Image.NEAREST)
 
         return {'image': img,
                 'label': mask,
-                'img_name': sample['img_name']}
+                'img_name': sample['img_name'],'ganTrue':sample['ganTrue']}
 
 
 class RandomSizedCrop(object):
@@ -268,6 +271,7 @@ class RandomSizedCrop(object):
         img = sample['image']
         mask = sample['label']
         name = sample['img_name']
+        ganTrue = sample['ganTrue']
         assert img.width == mask.width
         assert img.height == mask.height
         for attempt in range(10):
@@ -294,7 +298,7 @@ class RandomSizedCrop(object):
 
                 return {'image': img,
                         'label': mask,
-                        'img_name': name}
+                        'img_name': name,'ganTrue':ganTrue}
 
         # Fallback
         scale = Scale(self.size)
@@ -332,6 +336,7 @@ class RandomScaleCrop(object):
     def __call__(self, sample):
         img = sample['image']
         mask = sample['label']
+        img_gan = sample['img_gan']
         # print(img.size)
         assert img.width == mask.width
         assert img.height == mask.height
@@ -341,9 +346,10 @@ class RandomScaleCrop(object):
             w = int(random.uniform(1, 1.5) * img.size[0])
             h = int(random.uniform(1, 1.5) * img.size[1])
 
-            img, mask = img.resize((w, h), Image.BILINEAR), mask.resize((w, h), Image.NEAREST)
+            img, mask, img_gan = img.resize((w, h), Image.BILINEAR), mask.resize((w, h), Image.NEAREST), img_gan.resize((w, h), Image.BILINEAR)
             sample['image'] = img
             sample['label'] = mask
+            sample['img_gan'] = img_gan
 
         return self.crop(sample)
 
@@ -356,13 +362,14 @@ class ResizeImg(object):
         img = sample['image']
         mask = sample['label']
         name = sample['img_name']
+        ganTrue = sample['ganTrue']
         assert img.width == mask.width
         assert img.height == mask.height
 
         img = img.resize((self.size, self.size))
         # mask = mask.resize((self.size, self.size))
 
-        sample = {'image': img, 'label': mask, 'img_name': name}
+        sample = {'image': img, 'label': mask, 'img_name': name,'ganTrue':ganTrue}
         return sample
 
 
@@ -374,13 +381,14 @@ class Resize(object):
         img = sample['image']
         mask = sample['label']
         name = sample['img_name']
+        ganTrue = sample['ganTrue']
         assert img.width == mask.width
         assert img.height == mask.height
 
         img = img.resize((self.size, self.size))
         mask = mask.resize((self.size, self.size))
 
-        sample = {'image': img, 'label': mask, 'img_name': name}
+        sample = {'image': img, 'label': mask, 'img_name': name, 'ganTrue':ganTrue}
         return sample
 
 
@@ -422,7 +430,7 @@ class Normalize(object):
 
         return {'image': img,
                 'label': mask,
-                'img_name': sample['img_name']}
+                'img_name': sample['img_name'],'ganTrue':sample['ganTrue']}
 
 
 class GetBoundary(object):
@@ -458,9 +466,12 @@ class Normalize_tf(object):
 
     def __call__(self, sample):
         img = np.array(sample['image']).astype(np.float32)
+        img_gan = np.array(sample['img_gan']).astype(np.float32)
         __mask = np.array(sample['label']).astype(np.uint8)
         img /= 127.5
         img -= 1.0
+        img_gan /= 127.5
+        img_gan -= 1.0
         _mask = np.zeros([__mask.shape[0], __mask.shape[1]])
         _mask[__mask > 200] = 255
         # index = np.where(__mask > 50 and __mask < 201)
@@ -473,6 +484,7 @@ class Normalize_tf(object):
 
         mask = to_multilabel(__mask)
         sample['image'] = img
+        sample['img_gan'] = img_gan
         sample['label'] = mask
         return sample
 
@@ -526,10 +538,15 @@ class ToTensor(object):
         # numpy image: H x W x C
         # torch image: C X H X W
         img = np.array(sample['image']).astype(np.float32).transpose((2, 0, 1))
+        img_gan = np.array(sample['img_gan']).astype(np.float32).transpose((2, 0, 1))
         map = np.array(sample['label']).astype(np.uint8).transpose((2, 0, 1))
+
         img = torch.from_numpy(img).float()
+        img_gan = torch.from_numpy(img_gan).float()
         map = torch.from_numpy(map).float()
+
         sample['image']=img
+        sample['img_gan']=img_gan
         sample['label']=map
         domain_code = torch.from_numpy(SoftLable(ToMultiLabel(sample['dc']))).float()
         sample['dc'] = domain_code
